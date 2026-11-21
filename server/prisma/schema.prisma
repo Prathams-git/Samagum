@@ -1,0 +1,296 @@
+// Samaagum database schema (Prisma 6, PostgreSQL 16)
+// Money is ALWAYS stored as integer paise (1 rupee = 100 paise). Never floats.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  HOST
+  MEMBER
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+}
+
+enum ClubVisibility {
+  PUBLIC
+  PRIVATE
+}
+
+enum MemberStatus {
+  PENDING // asked to join a private club, host has not approved yet
+  ACTIVE
+}
+
+enum EventStatus {
+  DRAFT
+  PUBLISHED
+  CANCELLED
+}
+
+enum TicketKind {
+  FREE
+  EARLY_BIRD
+  VIP
+}
+
+enum OrderStatus {
+  CREATED
+  PAID
+  FAILED
+  REFUNDED
+}
+
+enum TicketStatus {
+  VALID
+  CHECKED_IN
+  CANCELLED
+}
+
+enum LedgerAccount {
+  ATTENDEE_PAID // money received from the attendee
+  PLATFORM_FEE // Samaagum's cut
+  HOST_PAYABLE // owed to the host
+  HOST_PAYOUT // simulated payout to the host
+}
+
+enum LedgerDirection {
+  DEBIT
+  CREDIT
+}
+
+enum NotificationKind {
+  REMINDER_60
+  REMINDER_30
+  REMINDER_10
+  GENERAL
+}
+
+enum ReportStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+model User {
+  id           String     @id @default(uuid())
+  email        String     @unique
+  name         String
+  passwordHash String // argon2 hash, never the password
+  role         Role       @default(MEMBER)
+  status       UserStatus @default(ACTIVE)
+  bio          String?
+  avatarUrl    String?
+  createdAt    DateTime   @default(now())
+
+  ownedClubs      Club[]
+  memberships     ClubMember[]
+  hostedEvents    Event[]
+  orders          Order[]
+  tickets         Ticket[]
+  scannedTickets  Ticket[]       @relation("CheckedInBy")
+  messages        Message[]
+  notifications   Notification[]
+  ledgerEntries   LedgerEntry[]
+  reportsFiled    Report[]       @relation("Reporter")
+  reportsAgainst  Report[]       @relation("ReportTargetUser")
+  reportsResolved Report[]       @relation("ReportResolver")
+}
+
+model Club {
+  id          String         @id @default(uuid())
+  name        String
+  description String?
+  visibility  ClubVisibility @default(PUBLIC)
+  ownerId     String
+  createdAt   DateTime       @default(now())
+
+  owner    User         @relation(fields: [ownerId], references: [id])
+  members  ClubMember[]
+  events   Event[]
+  messages Message[]
+  reports  Report[]
+
+  @@index([ownerId])
+}
+
+model ClubMember {
+  clubId   String
+  userId   String
+  status   MemberStatus @default(ACTIVE)
+  joinedAt DateTime     @default(now())
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([clubId, userId])
+  @@index([userId])
+}
+
+model Event {
+  id          String      @id @default(uuid())
+  clubId      String
+  hostId      String
+  title       String
+  description String?
+  venue       String?
+  startsAt    DateTime
+  endsAt      DateTime?
+  capacity    Int
+  status      EventStatus @default(DRAFT)
+  createdAt   DateTime    @default(now())
+
+  club          Club           @relation(fields: [clubId], references: [id])
+  host          User           @relation(fields: [hostId], references: [id])
+  ticketTypes   TicketType[]
+  tickets       Ticket[]
+  messages      Message[]
+  notifications Notification[]
+
+  @@index([clubId])
+  @@index([startsAt])
+}
+
+model TicketType {
+  id         String     @id @default(uuid())
+  eventId    String
+  name       String
+  kind       TicketKind
+  pricePaise Int        @default(0) // 0 for FREE
+  quantity   Int // how many of this type can be sold
+  salesEndAt DateTime? // early-bird cut-off date
+
+  event  Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  orders Order[]
+  tickets Ticket[]
+
+  @@index([eventId])
+}
+
+model Order {
+  id                String      @id @default(uuid())
+  userId            String
+  ticketTypeId      String
+  amountPaise       Int
+  status            OrderStatus @default(CREATED)
+  razorpayOrderId   String?     @unique
+  razorpayPaymentId String?     @unique // unique = the same payment can never issue two tickets
+  createdAt         DateTime    @default(now())
+
+  user       User          @relation(fields: [userId], references: [id])
+  ticketType TicketType    @relation(fields: [ticketTypeId], references: [id])
+  ticket     Ticket?
+  ledger     LedgerEntry[]
+
+  @@index([userId])
+}
+
+model Ticket {
+  id            String       @id @default(uuid())
+  eventId       String
+  ticketTypeId  String
+  userId        String
+  orderId       String?      @unique // null for free tickets
+  status        TicketStatus @default(VALID)
+  qrSecret      String // random per-ticket secret used to sign the rotating QR code
+  checkedInAt   DateTime?
+  checkedInById String?
+  createdAt     DateTime     @default(now())
+
+  event       Event      @relation(fields: [eventId], references: [id])
+  ticketType  TicketType @relation(fields: [ticketTypeId], references: [id])
+  user        User       @relation(fields: [userId], references: [id])
+  order       Order?     @relation(fields: [orderId], references: [id])
+  checkedInBy User?      @relation("CheckedInBy", fields: [checkedInById], references: [id])
+
+  // One ticket per person per event. Remove this line if you want to allow group bookings.
+  @@unique([eventId, userId])
+  @@index([eventId])
+}
+
+// A chat message belongs to exactly one room: a club OR an event.
+// Prisma cannot express "exactly one of these is set", so the server must check it.
+model Message {
+  id        String   @id @default(uuid())
+  senderId  String
+  clubId    String?
+  eventId   String?
+  body      String
+  createdAt DateTime @default(now())
+
+  sender User   @relation(fields: [senderId], references: [id])
+  club   Club?  @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  event  Event? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([clubId, createdAt])
+  @@index([eventId, createdAt])
+}
+
+// Append-only double-entry ledger. Rows are NEVER updated or deleted (see ledger_immutable.sql).
+// All rows sharing a transactionId must have DEBIT total == CREDIT total.
+// A refund is written as new rows that reverse the originals (reversesId points at the original).
+model LedgerEntry {
+  id            String          @id @default(uuid())
+  transactionId String // groups the balanced entries of one money movement
+  orderId       String?
+  userId        String? // the host, for HOST_PAYABLE and HOST_PAYOUT rows
+  account       LedgerAccount
+  direction     LedgerDirection
+  amountPaise   Int // always positive; direction says which side
+  memo          String?
+  reversesId    String?
+  createdAt     DateTime        @default(now())
+
+  order    Order?        @relation(fields: [orderId], references: [id])
+  user     User?         @relation(fields: [userId], references: [id])
+  reverses LedgerEntry?  @relation("Reversal", fields: [reversesId], references: [id])
+  reversedBy LedgerEntry[] @relation("Reversal")
+
+  @@index([transactionId])
+  @@index([orderId])
+}
+
+model Notification {
+  id        String           @id @default(uuid())
+  userId    String
+  eventId   String?
+  kind      NotificationKind
+  title     String
+  body      String?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  event Event? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  // Stops the same reminder being created twice for the same person and event.
+  @@unique([userId, eventId, kind])
+  @@index([userId, readAt])
+}
+
+model Report {
+  id           String       @id @default(uuid())
+  reporterId   String
+  targetUserId String?
+  targetClubId String?
+  reason       String
+  status       ReportStatus @default(OPEN)
+  resolvedById String?
+  createdAt    DateTime     @default(now())
+
+  reporter   User  @relation("Reporter", fields: [reporterId], references: [id])
+  targetUser User? @relation("ReportTargetUser", fields: [targetUserId], references: [id])
+  targetClub Club? @relation(fields: [targetClubId], references: [id])
+  resolver   User? @relation("ReportResolver", fields: [resolvedById], references: [id])
+
+  @@index([status])
+}
