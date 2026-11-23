@@ -51,4 +51,4 @@ This is a college project. The goal is a complete, working app I can demo on loc
 
 1. Skeleton  2. Database schema  3. Login and roles  4. Clubs  5. Events and ticket types  6. Tickets, rotating QR, scanner  7. Razorpay payments and ledger  8. Live chat  9. Profiles and networking  10. AI event assistant  11. Reminders  12. Admin tools  13. Polish and demo prep
 
-Current phase: 1. Skeleton
+Current phase: Phase 2 done (database and seed)
